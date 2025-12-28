@@ -19,6 +19,13 @@ st.set_page_config(
 )
 
 init_db()
+from database import get_articles
+from pipeline import run_pipeline
+
+# Run ingestion if DB is empty (Streamlit Cloud fix)
+if not get_articles(limit=1):
+    with st.spinner("Loading Welsh Government documents…"):
+        run_pipeline()
 
 # ================= SESSION STATE =================
 st.session_state.setdefault("page", "home")
