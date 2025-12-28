@@ -19,21 +19,14 @@ st.set_page_config(
 )
 
 init_db()
-from database import get_articles
-from pipeline import run_pipeline
-
-# Run ingestion if DB is empty (Streamlit Cloud fix)
-if not get_articles(limit=1):
-    with st.spinner("Loading Welsh Government documents…"):
-        run_pipeline()
 
 # ================= SESSION STATE =================
 st.session_state.setdefault("page", "home")
 st.session_state.setdefault("category", None)
 st.session_state.setdefault("article_id", None)
 st.session_state.setdefault("filters", {"kw": "", "topics": [], "orgs": []})
-st.session_state.setdefault("notes", {})
-st.session_state.setdefault("summary_feedback", {})
+st.session_state.setdefault("notes", {})              # article_id -> text
+st.session_state.setdefault("summary_feedback", {})   # article_id -> "up"/"down"
 
 # ================= OPENAI =================
 def get_client():
@@ -195,7 +188,7 @@ def page_browse():
         )
 
         if not articles:
-            st.info("No articles available yet. Data will appear once ingestion runs.")
+            st.info("No articles available yet.")
             return
 
         for a in articles:
@@ -212,10 +205,12 @@ def page_browse():
             with b2:
                 st.link_button("Source", a["url"])
             with b3:
-                st.button("Unsave" if a["saved"] else "Save",
-                          key=f"s{a['id']}",
-                          on_click=toggle_save,
-                          args=(a["id"],))
+                st.button(
+                    "Unsave" if a["saved"] else "Save",
+                    key=f"s{a['id']}",
+                    on_click=toggle_save,
+                    args=(a["id"],),
+                )
             st.divider()
 
 
@@ -229,12 +224,15 @@ def page_article():
     st.title(article["title"])
     st.caption(f"{article['published']} · {article['organisations']}")
 
-    st.button("Unsave" if article["saved"] else "Save",
-              on_click=toggle_save,
-              args=(article["id"],))
+    st.button(
+        "Unsave" if article["saved"] else "Save",
+        on_click=toggle_save,
+        args=(article["id"],),
+    )
 
     tabs = st.tabs(["Summary", "Context", "Translation", "Original"])
 
+    # -------- SUMMARY --------
     with tabs[0]:
         if st.button("Generate / Refresh summary"):
             s = generate_summary(article["raw_text"])
@@ -242,19 +240,55 @@ def page_article():
 
         st.markdown(article["summary"] or "_No summary yet_")
 
+        st.markdown("### Was this summary helpful?")
+        f1, f2 = st.columns(2)
+        with f1:
+            if st.button("👍 Helpful"):
+                st.session_state.summary_feedback[article["id"]] = "up"
+        with f2:
+            if st.button("👎 Not helpful"):
+                st.session_state.summary_feedback[article["id"]] = "down"
+
+        if article["id"] in st.session_state.summary_feedback:
+            st.caption(
+                f"Feedback recorded: {st.session_state.summary_feedback[article['id']]}"
+            )
+
+        st.markdown("### Comments & notes")
+        note = st.text_area(
+            "Your notes",
+            value=st.session_state.notes.get(article["id"], ""),
+            height=120,
+        )
+        if st.button("Save notes"):
+            st.session_state.notes[article["id"]] = note
+            st.success("Notes saved")
+
+    # -------- CONTEXT --------
     with tabs[1]:
-        if not article["context"]:
+        if not article.get("context"):
             ctx = generate_context(article)
             update_text(article["id"], "context", ctx)
         st.markdown(article["context"])
 
+    # -------- TRANSLATION --------
     with tabs[2]:
-        lang = st.selectbox("Target language", ["Hindi", "Welsh", "French", "Spanish"])
+        lang = st.selectbox(
+            "Target language",
+            ["Hindi", "Welsh", "French", "Spanish", "German", "Arabic"],
+        )
+
         if st.button("Translate"):
             tr = translate_text(article["raw_text"], lang)
             update_text(article["id"], "translation", tr)
-        st.text_area("Translation", article["translation"] or "", height=260)
 
+        st.text_area(
+            f"Translation ({lang})",
+            article.get("translation") or "",
+            height=260,
+        )
+
+    # -------- ORIGINAL --------
     with tabs[3]:
         st.text_area("Original text", article["raw_text"], height=500)
 

@@ -22,7 +22,18 @@ def run_pipeline(max_pages_each: int = 2):
 
         print(f"[{i}] {category} | {title}")
 
-        text, meta, is_pdf, is_junk, reason = extract_article(url)
+        result = extract_article(url)
+
+# Backward compatibility
+        if len(result) == 5:
+         text, meta, is_pdf, is_junk, reason = result
+        elif len(result) == 3:
+          text, meta, is_pdf = result
+          is_junk = False
+          reason = None
+        else:
+            raise ValueError("Unexpected return format from extract_article")
+
 
         # Only skip if truly junk (explicit junk or empty)
         if is_junk and reason in {"html_empty_or_too_small", "pdf_empty", "pdf_failed"}:
