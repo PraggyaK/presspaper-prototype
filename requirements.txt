@@ -1,9 +1,10 @@
-streamlit
+
 requests
 beautifulsoup4
 pdfplumber
 PyPDF2
 feedparser
 python-dotenv
-openai>=1.40.0
-
+streamlit==1.41.1
+openai>=1.50.0
+psycopg[binary]>=3.2.0

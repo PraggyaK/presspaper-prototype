@@ -16,5 +16,5 @@ presspaper.db
 .DS_Store
 Thumbs.db
 
-
+.env
 .streamlit/secrets.toml
