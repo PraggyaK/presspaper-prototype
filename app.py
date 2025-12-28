@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 import streamlit as st
-from googletrans import Translator
+from openai import OpenAI
 
 from database import (
     init_db,
@@ -13,9 +13,11 @@ from database import (
 )
 
 # ================= CONFIG =================
-st.set_page_config("PressPaper", layout="wide")
+st.set_page_config(
+    page_title="PressPaper",
+    layout="wide",
+)
 init_db()
-translator = Translator()
 
 # ================= SESSION STATE =================
 st.session_state.setdefault("page", "home")
@@ -25,11 +27,19 @@ st.session_state.setdefault("filters", {"kw": "", "topics": [], "orgs": []})
 st.session_state.setdefault("notes", {})
 st.session_state.setdefault("summary_feedback", {})
 
+# ================= OPENAI =================
+def get_client():
+    key = st.secrets.get("OPENAI_API_KEY")
+    if not key:
+        st.error("OPENAI_API_KEY missing in Streamlit secrets.")
+        st.stop()
+    return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
 # ================= HELPERS =================
 def clean_text(text: str) -> str:
     junk = [
         "Share this page", "via Facebook", "via X", "via Email",
-        "Cookies", "Accessibility", "How we use your data"
+        "How we use your data", "Cookies", "Accessibility"
     ]
     for j in junk:
         text = text.replace(j, "")
@@ -37,40 +47,73 @@ def clean_text(text: str) -> str:
 
 
 def generate_summary(text: str) -> str:
+    client = get_client()
     text = clean_text(text)
-    sentences = [s.strip() for s in text.split(". ") if len(s) > 40]
 
-    if not sentences:
-        return "_Not enough content to summarise._"
+    prompt = f"""
+Summarise this Welsh Government document clearly.
 
-    overview = sentences[0]
-    bullets = sentences[1:5]
-    impact = sentences[-1]
+Return in this format:
 
+Key points:
+- bullet 1
+- bullet 2
+- bullet 3
+
+Why it matters:
+1–2 sentences.
+
+TEXT:
+{text[:6000]}
+"""
+
+    res = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You summarise government documents accurately."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
+    return res.choices[0].message.content.strip()
+
+
+def generate_context(article):
     return (
-        "### Overview\n"
-        f"{overview}.\n\n"
-        "### Key points\n" +
-        "\n".join(f"- {b}." for b in bullets) +
-        "\n\n### Why it matters\n"
-        f"{impact}."
+        f"**Publisher:** {article['organisations']}\n\n"
+        f"**Published:** {article['published']}\n\n"
+        f"**Topics:** {article['topics']}\n\n"
+        "This document represents an official Welsh Government communication "
+        "and affects policy stakeholders, public services, and citizens."
     )
 
 
-def generate_context(article) -> str:
-    return (
-        f"This document was published by **{article['organisations']}** "
-        f"on **{article['published']}**.\n\n"
-        f"It relates to **{article['topics']}** and communicates official "
-        "government policy, announcements, or data.\n\n"
-        "It is relevant to public bodies, policymakers, service providers, "
-        "and the general public."
+def translate_text(text: str, target_lang: str) -> str:
+    client = get_client()
+
+    prompt = f"""
+Translate the following government document into {target_lang}.
+Keep tone official. Do not add or remove facts.
+
+TEXT:
+{text[:6000]}
+"""
+
+    res = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You translate government documents faithfully."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
     )
+    return res.choices[0].message.content.strip()
 
 
 def open_article(article_id: int):
     st.session_state.article_id = article_id
     st.session_state.page = "article"
+
 
 # ================= SIDEBAR =================
 with st.sidebar:
@@ -86,6 +129,7 @@ with st.sidebar:
 
     if nav.lower() != st.session_state.page and st.session_state.page != "article":
         st.session_state.page = nav.lower()
+        st.rerun()
 
 # ================= PAGES =================
 def page_home():
@@ -95,6 +139,7 @@ def page_home():
     def go(cat):
         st.session_state.category = cat
         st.session_state.page = "browse"
+        st.rerun()
 
     c1, c2 = st.columns(2)
     with c1:
@@ -119,22 +164,19 @@ def page_browse():
             ["Health", "Education", "Public sector", "Environment", "Transport"],
             st.session_state.filters["topics"],
         )
-
-        # get all orgs from DB results
-        all_articles = get_articles(st.session_state.category, "", [])
-        all_orgs = sorted({a["organisations"] for a in all_articles if a["organisations"]})
-
         orgs = st.multiselect(
             "Organisations",
-            all_orgs,
+            ["Welsh Government", "NHS Wales"],
             st.session_state.filters["orgs"],
         )
 
         if st.button("Apply filters", use_container_width=True):
             st.session_state.filters = {"kw": kw, "topics": topics, "orgs": orgs}
+            st.rerun()
 
         if st.button("Clear filters", use_container_width=True):
             st.session_state.filters = {"kw": "", "topics": [], "orgs": []}
+            st.rerun()
 
     with left:
         articles = get_articles(
@@ -143,34 +185,24 @@ def page_browse():
             topics=st.session_state.filters["topics"],
         )
 
-        # apply organisation filter safely in Python
-        if st.session_state.filters["orgs"]:
-            articles = [
-                a for a in articles
-                if a["organisations"] in st.session_state.filters["orgs"]
-            ]
-
-        if not articles:
-            st.info("No articles match your filters.")
-            return
-
         for a in articles:
+            if st.session_state.filters["orgs"] and a["organisations"] not in st.session_state.filters["orgs"]:
+                continue
+
             st.markdown(f"### {a['title']}")
             st.caption(f"{a['published']} · {a['organisations']}")
             st.markdown(f"**Topics:** {a['topics']}")
 
-            c1, c2, c3 = st.columns(3)
-            with c1:
+            b1, b2, b3 = st.columns(3)
+            with b1:
                 st.button("Read", key=f"r{a['id']}", on_click=open_article, args=(a["id"],))
-            with c2:
+            with b2:
                 st.link_button("Source", a["url"])
-            with c3:
-                st.button(
-                    "Unsave" if a["saved"] else "Save",
-                    key=f"s{a['id']}",
-                    on_click=toggle_save,
-                    args=(a["id"],),
-                )
+            with b3:
+                st.button("Unsave" if a["saved"] else "Save",
+                          key=f"s{a['id']}",
+                          on_click=toggle_save,
+                          args=(a["id"],))
             st.divider()
 
 
@@ -182,89 +214,83 @@ def page_article():
     st.title(article["title"])
     st.caption(f"{article['published']} · {article['organisations']}")
 
-    st.button(
-        "Unsave" if article["saved"] else "Save",
-        on_click=toggle_save,
-        args=(article["id"],),
-    )
+    st.button("Unsave" if article["saved"] else "Save",
+              on_click=toggle_save,
+              args=(article["id"],))
 
     tabs = st.tabs(["Summary", "Context", "Translation", "Original"])
 
+    # -------- SUMMARY --------
     with tabs[0]:
         if st.button("Generate / Refresh summary"):
-            summary = generate_summary(article["raw_text"])
-            update_text(article["id"], "summary", summary)
+            s = generate_summary(article["raw_text"])
+            update_text(article["id"], "summary", s)
+            st.rerun()
 
         st.markdown(article["summary"] or "_No summary yet_")
 
-        st.markdown("**Was this summary helpful?**")
+        st.subheader("Was this summary helpful?")
         c1, c2 = st.columns(2)
         with c1:
             if st.button("👍"):
-                st.session_state.summary_feedback[article["id"]] = "positive"
+                st.session_state.summary_feedback[article["id"]] = "helpful"
         with c2:
             if st.button("👎"):
-                st.session_state.summary_feedback[article["id"]] = "negative"
+                st.session_state.summary_feedback[article["id"]] = "not helpful"
 
         st.subheader("Comments & notes")
         note = st.text_area(
             "Your notes",
-            value=st.session_state.notes.get(article["id"], ""),
-            height=120,
+            value=st.session_state.notes.get(article["id"], "")
         )
         if st.button("Save notes"):
             st.session_state.notes[article["id"]] = note
             st.success("Saved")
 
+    # -------- CONTEXT --------
     with tabs[1]:
-        if not article.get("context"):
+        if not article["context"]:
             ctx = generate_context(article)
             update_text(article["id"], "context", ctx)
+            st.rerun()
         st.markdown(article["context"])
 
+    # -------- TRANSLATION --------
     with tabs[2]:
-        languages = {
-            "English": "en",
-            "Welsh": "cy",
-            "Hindi": "hi",
-            "French": "fr",
-            "Spanish": "es",
-            "German": "de",
-            "Italian": "it",
-            "Portuguese": "pt",
-            "Arabic": "ar",
-            "Chinese": "zh-cn",
-        }
+        lang = st.selectbox(
+            "Target language",
+            ["Hindi", "Welsh", "French", "Spanish", "German", "Arabic", "Urdu"],
+        )
 
-        lang = st.selectbox("Translate to", list(languages.keys()))
         if st.button("Translate"):
-            translated = translator.translate(
-                article["raw_text"], dest=languages[lang]
-            ).text
-            update_text(article["id"], "translation", translated)
+            with st.spinner("Translating…"):
+                tr = translate_text(article["raw_text"], lang)
+                update_text(article["id"], "translation", tr)
+                st.rerun()
 
-        tr = st.text_area(
-            "Translated text",
-            value=article.get("translation") or "",
-            height=300,
+        tr_text = st.text_area(
+            f"Translation ({lang})",
+            value=article["translation"] or "",
+            height=260,
         )
 
         if st.button("Save translation"):
-            update_text(article["id"], "translation", tr)
+            update_text(article["id"], "translation", tr_text)
             st.success("Translation saved")
 
+    # -------- ORIGINAL --------
     with tabs[3]:
-        st.text_area("Original document", article["raw_text"], height=500)
+        st.text_area("Original text", article["raw_text"], height=500)
 
 
 def page_saved():
     st.title("Saved articles")
-
     for a in get_saved():
         st.markdown(f"### {a['title']}")
         st.button("Read", key=f"sr{a['id']}", on_click=open_article, args=(a["id"],))
         st.button("Unsave", key=f"us{a['id']}", on_click=toggle_save, args=(a["id"],))
         st.divider()
+
 
 # ================= ROUTER =================
 if st.session_state.page == "home":
